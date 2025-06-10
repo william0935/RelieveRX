@@ -1,4 +1,6 @@
-data/
-*.csv
+data/**
+!data/**/*.py
+
 myenv/
 *.txt
+*.csv
