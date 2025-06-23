@@ -1,137 +1,137 @@
 import os
-import pandas as pd
 import numpy as np
+import pandas as pd
 from datetime import datetime
 from tqdm import tqdm
-import warnings
 import psutil
 
 # === CONFIGURATION ===
-INPUT_FOLDER = "mimic_iv_data/mimic-iv-3.1/hosp/.csv_files"
-OUTPUT_FILE = "vae_data/vae_input_hosp.csv"
+USE_OUTPUT_FILES = False
+FILE_SUFFIX = "_output.csv" if USE_OUTPUT_FILES else ".csv"
+ADMISSIONS_FILE = f"admissions{FILE_SUFFIX}"
+INPUT_FOLDER = "preprocessing/__hosp_outputs__" if USE_OUTPUT_FILES else "mimic_iv_data/mimic-iv-3.1/hosp/.csv_files"
+OUTPUT_FILE = "vae_data/vae_input_hosp_sample.csv" if USE_OUTPUT_FILES else "vae_data/vae_input_hosp.csv"
+OUTPUT_CLIPPED_FOLDER = "vae_data/__vae_outputs__"
+CLIPPED_LINES = 100
 ROWS_PER_PATIENT_PER_FILE = 100
+CHUNK_SIZE = 50000
 
 INCLUDED_COLUMNS_PER_FILE = {
     "diagnoses_icd": ["icd_code", "icd_version"],
     "procedures_icd": ["icd_code", "icd_version"],
-    "prescriptions": ["drug", "dose_val_rx", "dose_unit_rx", "route"],
+    "prescriptions": ["drug_type", "drug", "prod_strength", "dose_val_rx", "dose_unit_rx", "route", "starttime", "stoptime"],
     "labevents": ["itemid", "valuenum", "valueuom", "flag", "priority"],
     "emar": ["medication", "route"],
     "microbiologyevents": ["spec_type_desc", "test_name", "org_name", "interpretation"],
     "omr": ["result_name", "result_value"],
-    "pharmacy": ["medication", "dose_val_rx", "route"],
-    "drgcodes": ["drg_type", "drg_code", "description", "drg_severity", "drg_mortality"],
+    "pharmacy": ["medication", "route"],
+    "drgcodes": ["drg_type", "drg_code", "drg_severity", "drg_mortality"],
     "services": ["curr_service"],
     "transfers": ["eventtype", "careunit"],
-    "emar_detail": ["dose_due", "dose_given", "route", "product_description"],
+    "emar_detail": ["dose_due", "dose_given", "route", "product_code"],
     "poe": ["order_type", "order_status"],
     "poe_detail": ["field_value"],
-    "hcpcsevents": ["hcpcs_cd", "short_description"],
+    "hcpcsevents": ["hcpcs_cd"],
     "admissions": ["admission_type", "insurance", "marital_status", "race", "hospital_expire_flag"],
     "patients": ["gender", "anchor_age", "anchor_year", "anchor_year_group"]
 }
 
-RELATIVE_TIME_COLUMNS = {
-    "charttime", "storetime", "starttime", "stoptime", "chartdate", "edregtime", "edouttime",
-    "ordertime", "eventtime", "intime", "outtime"
-}
+SPECIAL_NUMERIC_MISSING_VALUE = -9999
+SPECIAL_CATEGORY_MISSING_VALUE = -1
 
-DURATION_COLUMNS = [
-    ("starttime", "stoptime"),
-    ("intime", "outtime"),
-]
-
-ADMISSIONS_FILE = "admissions.csv"
-
-def parse_datetime_safe(x):
-    try:
-        return pd.to_datetime(x)
-    except:
-        return pd.NaT
-
-def compute_relative_time(df, time_col, new_col_name):
-    df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
-    df[new_col_name] = (df[time_col] - df["baseline_time"]).dt.total_seconds() / 3600
-    df.drop(columns=[time_col], inplace=True)
-    return df
-
-def compute_duration(df, start_col, end_col, new_col_name):
-    df[start_col] = pd.to_datetime(df[start_col], errors='coerce')
-    df[end_col] = pd.to_datetime(df[end_col], errors='coerce')
-    df[new_col_name] = (df[end_col] - df[start_col]).dt.total_seconds() / 3600
-    df.drop(columns=[start_col, end_col], inplace=True)
-    return df
+def print_memory_usage(prefix=""):
+    mem = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
+    print(f"{prefix}Memory usage: {mem:.2f} GB")
 
 def flatten_patient_groups(df, file_prefix):
     included_cols = INCLUDED_COLUMNS_PER_FILE.get(file_prefix, [])
     if not included_cols:
-        return []
+        return pd.DataFrame()
 
-    result = []
-    for subject_id, group in df.groupby("subject_id"):
+    patient_rows = []
+    for subject_id, group in tqdm(df.groupby("subject_id"), desc=f"Flattening {file_prefix}", leave=True):
         padded = group.iloc[:ROWS_PER_PATIENT_PER_FILE].copy()
-        if len(padded) < ROWS_PER_PATIENT_PER_FILE:
-            pad_len = ROWS_PER_PATIENT_PER_FILE - len(padded)
-            padding = pd.DataFrame(np.nan, index=range(pad_len), columns=group.columns)
-            padded = pd.concat([padded, padding], ignore_index=True)
+        pad_len = ROWS_PER_PATIENT_PER_FILE - len(padded)
+        if pad_len > 0:
+            pad = {
+                col: [SPECIAL_NUMERIC_MISSING_VALUE if pd.api.types.is_numeric_dtype(group[col]) else SPECIAL_CATEGORY_MISSING_VALUE] * pad_len
+                for col in group.columns
+            }
+            padded = pd.concat([padded, pd.DataFrame(pad)], ignore_index=True)
 
-        row = {"subject_id": subject_id}
+        row = {"subject_id": int(subject_id)}
         for col in included_cols:
             if col not in padded.columns:
                 continue
             vals = padded[col].tolist()
+            if pd.api.types.is_numeric_dtype(padded[col]):
+                vals = [v if pd.notnull(v) else SPECIAL_NUMERIC_MISSING_VALUE for v in vals]
+            else:
+                cat_series = pd.Series([
+                    v if v != SPECIAL_CATEGORY_MISSING_VALUE else np.nan for v in vals
+                ]).astype("category")
+                codes = cat_series.cat.codes.replace(-1, SPECIAL_CATEGORY_MISSING_VALUE)
+                vals = codes.tolist()
             for i, val in enumerate(vals):
                 row[f"{file_prefix}_{col}_{i}"] = val
-        result.append(row)
-    return result
+        patient_rows.append(row)
 
-def process_file(filepath, file_prefix, baseline_times, output_handle):
-    print(f"Processing {file_prefix}...")
+    return pd.DataFrame(patient_rows)
 
+def process_file(filepath, file_prefix, baseline_times, accumulated):
     try:
-        df = pd.read_csv(filepath)
+        if "subject_id" not in pd.read_csv(filepath, nrows=1).columns:
+            print(f"Skipping {file_prefix}: no subject_id")
+            return
     except Exception as e:
-        print(f"Failed to load {file_prefix}: {e}")
+        print(f"Error reading {filepath}: {e}")
         return
 
-    if "subject_id" not in df.columns:
-        print(f"Skipping {file_prefix}: no subject_id column.")
-        return
+    for chunk in pd.read_csv(filepath, chunksize=CHUNK_SIZE, low_memory=False):
+        chunk["subject_id"] = pd.to_numeric(chunk["subject_id"], errors="coerce").astype("Int64")
+        chunk = chunk.merge(baseline_times, on="subject_id", how="left")
+        chunk = chunk[chunk["baseline_time"].notna()]
+        flat_chunk = flatten_patient_groups(chunk, file_prefix)
+        if not flat_chunk.empty:
+            accumulated.append(flat_chunk)
+        print(f"  Processed {len(chunk)} rows in {file_prefix}")
+        print_memory_usage(f"    After chunk in {file_prefix}: ")
 
-    df = df.merge(baseline_times, on="subject_id", how="inner")
-
-    for time_col in RELATIVE_TIME_COLUMNS:
-        if time_col in df.columns:
-            df = compute_relative_time(df, time_col, f"{time_col}_since_admit_hours")
-
-    for start_col, end_col in DURATION_COLUMNS:
-        if start_col in df.columns and end_col in df.columns:
-            df = compute_duration(df, start_col, end_col, f"{start_col}_to_{end_col}_duration_hours")
-
-    flattened = flatten_patient_groups(df, file_prefix)
-    flat_df = pd.DataFrame(flattened)
-
-    flat_df.to_csv(output_handle, mode='a', header=output_handle.tell() == 0, index=False)
+def write_clipped_version(input_path, output_folder, max_lines=100):
+    os.makedirs(output_folder, exist_ok=True)
+    filename = os.path.basename(input_path)
+    output_path = os.path.join(output_folder, filename.replace(".csv", "_output.csv"))
+    with open(input_path, "r", buffering=1 << 16) as infile, open(output_path, "w", buffering=1 << 16) as outfile:
+        for i, line in enumerate(infile):
+            if i >= max_lines:
+                break
+            outfile.write(line)
+    print(f"Clipped version written to: {output_path}")
 
 def main():
-    print("Loading baseline times...")
-    admissions_path = os.path.join(INPUT_FOLDER, ADMISSIONS_FILE)
-    admissions = pd.read_csv(admissions_path, parse_dates=["admittime"])
-    baseline_times = admissions[["subject_id", "admittime"]].dropna()
-    baseline_times = baseline_times.groupby("subject_id").first().rename(columns={"admittime": "baseline_time"})
-    baseline_times.reset_index(inplace=True)
-
-    files = sorted([f for f in os.listdir(INPUT_FOLDER) if f.endswith(".csv") and f != ADMISSIONS_FILE])
-
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-    with open(OUTPUT_FILE, 'w') as f_out:
-        for fname in tqdm(files, desc="All Files"):
-            file_prefix = os.path.splitext(fname)[0].lower()
-            filepath = os.path.join(INPUT_FOLDER, fname)
-            process_file(filepath, file_prefix, baseline_times, f_out)
-            print(f"[{file_prefix}] Memory: {psutil.Process().memory_info().rss / 1e9:.2f} GB")
+    admissions_path = os.path.join(INPUT_FOLDER, ADMISSIONS_FILE)
+    admissions_df = pd.read_csv(admissions_path, usecols=["subject_id", "admittime"])
+    admissions_df["baseline_time"] = pd.to_datetime(admissions_df["admittime"], errors="coerce")
+    baseline_times = admissions_df[["subject_id", "baseline_time"]].copy()
+    baseline_times["subject_id"] = pd.to_numeric(baseline_times["subject_id"], errors="coerce").astype("Int64")
 
-    print(f"Output written to {OUTPUT_FILE}")
+    suffix = FILE_SUFFIX
+    csv_files = [f for f in os.listdir(INPUT_FOLDER) if f.endswith(suffix) and f != ADMISSIONS_FILE]
+    all_flattened_chunks = []
+
+    for fname in tqdm(csv_files, desc="Processing files"):
+        file_prefix = fname.replace(FILE_SUFFIX, "")
+        filepath = os.path.join(INPUT_FOLDER, fname)
+        process_file(filepath, file_prefix, baseline_times, all_flattened_chunks)
+        print_memory_usage(f"After {fname}: ")
+
+    if all_flattened_chunks:
+        final_df = pd.concat(all_flattened_chunks).groupby("subject_id").first().reset_index()
+        final_df.to_csv(OUTPUT_FILE, index=False)
+        print(f"Final flattened dataset written to: {OUTPUT_FILE}")
+
+    write_clipped_version(OUTPUT_FILE, OUTPUT_CLIPPED_FOLDER, max_lines=CLIPPED_LINES)
 
 if __name__ == "__main__":
     main()
