@@ -4,9 +4,10 @@ import pandas as pd
 from datetime import datetime
 from tqdm import tqdm
 import psutil
+import warnings
 
 # === CONFIGURATION ===
-USE_OUTPUT_FILES = False
+USE_OUTPUT_FILES = False  # Set to True to use output files, False to use original MIMIC-IV data
 FILE_SUFFIX = "_output.csv" if USE_OUTPUT_FILES else ".csv"
 ADMISSIONS_FILE = f"admissions{FILE_SUFFIX}"
 INPUT_FOLDER = "preprocessing/__hosp_outputs__" if USE_OUTPUT_FILES else "mimic_iv_data/mimic-iv-3.1/hosp/.csv_files"
@@ -36,8 +37,7 @@ INCLUDED_COLUMNS_PER_FILE = {
     "patients": ["gender", "anchor_age", "anchor_year", "anchor_year_group"]
 }
 
-SPECIAL_NUMERIC_MISSING_VALUE = -9999
-SPECIAL_CATEGORY_MISSING_VALUE = -1
+SPECIAL_MISSING_VALUE = -1
 
 def print_memory_usage(prefix=""):
     mem = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
@@ -53,11 +53,11 @@ def flatten_patient_groups(df, file_prefix):
         padded = group.iloc[:ROWS_PER_PATIENT_PER_FILE].copy()
         pad_len = ROWS_PER_PATIENT_PER_FILE - len(padded)
         if pad_len > 0:
-            pad = {
-                col: [SPECIAL_NUMERIC_MISSING_VALUE if pd.api.types.is_numeric_dtype(group[col]) else SPECIAL_CATEGORY_MISSING_VALUE] * pad_len
-                for col in group.columns
-            }
-            padded = pd.concat([padded, pd.DataFrame(pad)], ignore_index=True)
+            pad = {col: [np.nan] * pad_len for col in group.columns}
+            pad_df = pd.DataFrame(pad)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                padded = pd.concat([padded, pad_df], ignore_index=True)
 
         row = {"subject_id": int(subject_id)}
         for col in included_cols:
@@ -65,12 +65,10 @@ def flatten_patient_groups(df, file_prefix):
                 continue
             vals = padded[col].tolist()
             if pd.api.types.is_numeric_dtype(padded[col]):
-                vals = [v if pd.notnull(v) else SPECIAL_NUMERIC_MISSING_VALUE for v in vals]
+                pass  # keep NaNs, fill at the end
             else:
-                cat_series = pd.Series([
-                    v if v != SPECIAL_CATEGORY_MISSING_VALUE else np.nan for v in vals
-                ]).astype("category")
-                codes = cat_series.cat.codes.replace(-1, SPECIAL_CATEGORY_MISSING_VALUE)
+                cat_series = pd.Series(vals).astype("category")
+                codes = cat_series.cat.codes.replace(-1, SPECIAL_MISSING_VALUE)
                 vals = codes.tolist()
             for i, val in enumerate(vals):
                 row[f"{file_prefix}_{col}_{i}"] = val
@@ -128,6 +126,7 @@ def main():
 
     if all_flattened_chunks:
         final_df = pd.concat(all_flattened_chunks).groupby("subject_id").first().reset_index()
+        final_df.fillna(SPECIAL_MISSING_VALUE, inplace=True)
         final_df.to_csv(OUTPUT_FILE, index=False)
         print(f"Final flattened dataset written to: {OUTPUT_FILE}")
 
