@@ -5,6 +5,7 @@ from datetime import datetime
 from tqdm import tqdm
 import psutil
 import warnings
+import json
 
 # === CONFIGURATION ===
 USE_OUTPUT_FILES = False  # Set to True to use output files, False to use original MIMIC-IV data
@@ -13,6 +14,7 @@ ADMISSIONS_FILE = f"admissions{FILE_SUFFIX}"
 INPUT_FOLDER = "preprocessing/__hosp_outputs__" if USE_OUTPUT_FILES else "mimic_iv_data/mimic-iv-3.1/hosp/.csv_files"
 OUTPUT_FILE = "vae_data/vae_input_hosp_sample.csv" if USE_OUTPUT_FILES else "vae_data/vae_input_hosp.csv"
 OUTPUT_CLIPPED_FOLDER = "vae_data/__vae_outputs__"
+CATEGORY_MAPPING_FILE = "vae_data/category_mappings.json"
 CLIPPED_LINES = 100
 ROWS_PER_PATIENT_PER_FILE = 100
 CHUNK_SIZE = 50000
@@ -38,6 +40,7 @@ INCLUDED_COLUMNS_PER_FILE = {
 }
 
 SPECIAL_MISSING_VALUE = -1
+category_mappings = {}  # global dictionary to store category mappings
 
 def print_memory_usage(prefix=""):
     mem = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
@@ -70,6 +73,8 @@ def flatten_patient_groups(df, file_prefix):
                 cat_series = pd.Series(vals).astype("category")
                 codes = cat_series.cat.codes.replace(-1, SPECIAL_MISSING_VALUE)
                 vals = codes.tolist()
+                col_key = f"{file_prefix}_{col}"
+                category_mappings[col_key] = dict(enumerate(cat_series.cat.categories))
             for i, val in enumerate(vals):
                 row[f"{file_prefix}_{col}_{i}"] = val
         patient_rows.append(row)
@@ -129,6 +134,10 @@ def main():
         final_df.fillna(SPECIAL_MISSING_VALUE, inplace=True)
         final_df.to_csv(OUTPUT_FILE, index=False)
         print(f"Final flattened dataset written to: {OUTPUT_FILE}")
+
+    with open(CATEGORY_MAPPING_FILE, "w") as f:
+        json.dump(category_mappings, f)
+        print(f"Category mappings saved to: {CATEGORY_MAPPING_FILE}")
 
     write_clipped_version(OUTPUT_FILE, OUTPUT_CLIPPED_FOLDER, max_lines=CLIPPED_LINES)
 
