@@ -1,6 +1,9 @@
 data/**
 !data/**/*.py
 
-myenv/
+venv/
 *.txt
 *.csv
+*.zip
+
+.git_broken_backup/
