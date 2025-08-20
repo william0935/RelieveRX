@@ -1,0 +1,9 @@
+data/**
+!data/**/*.py
+
+venv/
+*.txt
+*.csv
+*.zip
+
+.git_broken_backup/
