@@ -8,20 +8,20 @@ import warnings
 import json
 
 # configuration
-USE_OUTPUT_FILES = False  # set to True to use output files, False to use original MIMIC-IV data
-FILE_SUFFIX = "_output.csv" if USE_OUTPUT_FILES else ".csv"
+FILE_SUFFIX = ".csv"
 ADMISSIONS_FILE = f"admissions{FILE_SUFFIX}"
-INPUT_FOLDER = "preprocessing/__hosp_outputs__" if USE_OUTPUT_FILES else "mimic_iv_data/mimic-iv-3.1/hosp/.csv_files"
-OUTPUT_FILE = "vae_data/vae_input_hosp_sample.csv" if USE_OUTPUT_FILES else "vae_data/vae_input_hosp.csv"
-OUTPUT_CLIPPED_FOLDER = "vae_data/__vae_outputs__"
-CATEGORY_MAPPING_FILE = "vae_data/category_mappings.json"
+INPUT_FOLDER = "mimic_iv_data/mimic-iv-3.1/hosp/.csv_files"
+OUTPUT_FILE = "model_data/feature_matrix.csv"
+OUTPUT_CLIPPED_FOLDER = "model_data/__sample_outputs__"
+CATEGORY_MAPPING_FILE = "model_data/category_mappings.json"
 CLIPPED_LINES = 100
 ROWS_PER_PATIENT_PER_FILE = 100
 CHUNK_SIZE = 50000
 
+# using icd version 10.0
 INCLUDED_COLUMNS_PER_FILE = {
-    "diagnoses_icd": ["icd_code", "icd_version"],
-    "procedures_icd": ["icd_code", "icd_version"],
+    "diagnoses_icd": ["icd_code"],
+    "procedures_icd": ["icd_code"],
     "prescriptions": ["drug_type", "drug", "prod_strength", "dose_val_rx", "dose_unit_rx", "route", "starttime", "stoptime"],
     "labevents": ["itemid", "valuenum", "valueuom", "flag", "priority"],
     "emar": ["medication", "route"],
