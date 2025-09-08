@@ -18,7 +18,7 @@ CLIPPED_LINES = 100
 ROWS_PER_PATIENT_PER_FILE = 100
 CHUNK_SIZE = 50000
 
-# using icd version 10.0
+# columns per file
 INCLUDED_COLUMNS_PER_FILE = {
     "diagnoses_icd": ["icd_code"],
     "procedures_icd": ["icd_code"],
@@ -40,7 +40,7 @@ INCLUDED_COLUMNS_PER_FILE = {
 }
 
 SPECIAL_MISSING_VALUE = -1
-category_mappings = {}  # global dictionary to store category mappings
+category_mappings = {}  # global dictionary to store sets of categories
 
 def print_memory_usage(prefix=""):
     mem = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
@@ -68,13 +68,19 @@ def flatten_patient_groups(df, file_prefix):
                 continue
             vals = padded[col].tolist()
             if pd.api.types.is_numeric_dtype(padded[col]):
-                pass # keep NaNs, fill at the end
+                pass  # keep numeric
             else:
+                col_key = f"{file_prefix}_{col}"
+                # accumulate all categories globally
+                if col_key not in category_mappings:
+                    category_mappings[col_key] = set()
+                # add new categories seen in this patient
+                category_mappings[col_key].update([v for v in vals if pd.notna(v)])
+                # convert to codes for this patient (will be remapped later)
                 cat_series = pd.Series(vals).astype("category")
                 codes = cat_series.cat.codes.replace(-1, SPECIAL_MISSING_VALUE)
                 vals = codes.tolist()
-                col_key = f"{file_prefix}_{col}"
-                category_mappings[col_key] = dict(enumerate(cat_series.cat.categories))
+
             for i, val in enumerate(vals):
                 row[f"{file_prefix}_{col}_{i}"] = val
         patient_rows.append(row)
@@ -135,8 +141,10 @@ def main():
         final_df.to_csv(OUTPUT_FILE, index=False)
         print(f"Final flattened dataset written to: {OUTPUT_FILE}")
 
+    # convert sets to sorted lists and save nicely formatted JSON
+    formatted_mappings = {k: sorted(list(v)) for k, v in category_mappings.items()}
     with open(CATEGORY_MAPPING_FILE, "w") as f:
-        json.dump(category_mappings, f)
+        json.dump(formatted_mappings, f, indent=4)
         print(f"Category mappings saved to: {CATEGORY_MAPPING_FILE}")
 
     write_clipped_version(OUTPUT_FILE, OUTPUT_CLIPPED_FOLDER, max_lines=CLIPPED_LINES)

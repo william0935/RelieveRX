@@ -24,15 +24,17 @@ os.makedirs(ANOMALY_OUTPUT_FOLDER, exist_ok=True)
 # 2. load and preprocess data
 ROWS_PER_PATIENT_PER_FILE = 100
 
+print("loading data...")
 df = pd.read_csv(INPUT_FILE)
 subject_ids = df["subject_id"].values
 features_df = df.select_dtypes(include=[np.number]).drop(columns=["subject_id"], errors="ignore")
+print("loaded data!")
 
-print("Applying signed log1p transform...")
+print("applying signed log1p transform...")
 log_transform = lambda x: np.sign(x) * np.log1p(np.abs(x))
 features_df = features_df.apply(log_transform)
 
-print("Standardizing features...")
+print("standardizing features...")
 X_scaled = np.empty_like(features_df.values, dtype=np.float32)
 scaler = StandardScaler()
 for i, col in enumerate(features_df.columns):
@@ -44,7 +46,7 @@ for i, col in enumerate(features_df.columns):
 X = X_scaled
 
 if not np.isfinite(X).all():
-    raise ValueError("Scaled data contains NaN or Inf.")
+    raise ValueError("scaled data contains NaN or Inf.")
 
 # splitting into training, validation, test
 X_trainval, X_test, ids_trainval, ids_test = train_test_split(
@@ -56,7 +58,7 @@ X_train, X_val, ids_train, ids_val = train_test_split(
 
 train_loader = DataLoader(TensorDataset(torch.tensor(X_train)), batch_size=256, shuffle=True)
 val_loader = DataLoader(TensorDataset(torch.tensor(X_val)), batch_size=256, shuffle=False)
-
+print("loaded training and validation!")
 
 # 3. define vae
 class VAE(nn.Module):
@@ -103,6 +105,7 @@ best_val_loss = float("inf")
 patience = 5
 patience_counter = 0
 
+print("starting training...")
 for epoch in range(EPOCHS):
     vae.train()
     total_loss = 0
@@ -145,6 +148,7 @@ for epoch in range(EPOCHS):
 
 # load best model before test evaluation
 vae.load_state_dict(torch.load("vae_best_model.pt"))
+print("finished training")
 
 
 # 5. anomaly detection
@@ -227,7 +231,7 @@ labels_df = pd.read_csv(LABELS_FILE)  # contains columns: subject_id, label (0/1
 
 # align labels with test set
 labels_test_df = labels_df.set_index("subject_id").loc[ids_test].reset_index()
-labels_test = labels_test_df["label"].values
+labels_test = labels_test_df["at_risk"].values
 
 # binary predictions from VAE (anomaly = 1, normal = 0)
 preds = anomalies.astype(int)

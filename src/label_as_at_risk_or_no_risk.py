@@ -1,17 +1,46 @@
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+import json
 
+## 1. globals
 INPUT_FILE = "../data/model_data/feature_matrix.csv"
 OUTPUT_FILE = "model/feature_matrix_labeled.csv"
 ICD_COLUMNS = [f"diagnoses_icd_icd_code_{i}" for i in range(100)]
 PRESCRIPTION_COLUMNS = [f"prescriptions_dose_val_rx_{i}" for i in range(100)]
+DRUG_COLUMNS = [f"prescriptions_drug_{i}" for i in range(100)]
+SUBJECT_COL = "subject_id"
 
-OVERDOSE_CODES = {"T40.0", "T40.1", "T40.2", "T40.3", "T40.4", "T40.6"}
-ESCALATION_MULTIPLIER = 3.0
-SUBJECT_COL = "subject_id"  # replace with your actual subject ID column
+# absolute MME increase threshold for escalation
+ABSOLUTE_MME_THRESHOLD = 50.0  # adjust as needed
 
-# load feature matrix with progress bar
+# overdose ICD codes
+OVERDOSE_CODES = {
+    "T400", "T401", "T402", "T403", "T404",
+    "T405", "T406", "T407", "T408", "T409"
+}
+
+# opioid MME conversion factors
+OPIOID_MME_FACTORS = {
+    "Codeine": 0.15,
+    "Hydrocodone": 1,
+    "Hydromorphone": 5,
+    "Methadone (acute)": 3,
+    "Methadone (chronic)": 4,
+    "Morphine": 1,
+    "Oxycodone": 1.5,
+    "Oxymorphone": 10,
+    "Tapentadol": 0.4,
+    "Tramadol": 0.1
+}
+
+## 2. load category mapping for ICD
+with open("../data/model_data/category_mappings.json", "r") as f:
+    category_mappings = json.load(f)
+
+icd_map = category_mappings["diagnoses_icd_icd_code"]
+
+## 3. load feature matrix
 print("loading feature matrix with progress bar...")
 total_lines = sum(1 for _ in open(INPUT_FILE)) - 1
 chunksize = 10000
@@ -25,39 +54,67 @@ with tqdm(total=total_lines, desc="Reading CSV") as pbar:
 df = pd.concat(chunks, ignore_index=True)
 print("loaded feature matrix!")
 
-def check_overdose(row):
+## 4. compute at risk flags
+def compute_at_risk(row):
+    # overdose ICD check
+    overdose_flag = 0
     for col in ICD_COLUMNS:
-        if col in row.index:
-            code = str(row[col]).strip()
-            if code in OVERDOSE_CODES:
-                return 1
-    return 0
+        if col in row and pd.notna(row[col]) and row[col] != -1:
+            code_index = str(int(row[col]))  # convert numeric index to string for mapping
+            code = icd_map.get(code_index, "")
+            if any(code.startswith(prefix) for prefix in OVERDOSE_CODES):
+                overdose_flag = 1
+                break
 
-def escalation_metrics(row, multiplier=ESCALATION_MULTIPLIER):
-    doses = [row[col] for col in PRESCRIPTION_COLUMNS if col in row.index and pd.notna(row[col]) and row[col] != -1]
+    # compute MME for escalation
+    mme_list = []
+    for drug_col, dose_col in zip(DRUG_COLUMNS, PRESCRIPTION_COLUMNS):
+        if drug_col in row and dose_col in row and pd.notna(row[dose_col]) and row[dose_col] != -1:
+            drug = str(row[drug_col]).strip()
+            dose_val = row[dose_col]
+            try:
+                dose = float(dose_val)
+                factor = OPIOID_MME_FACTORS.get(drug, 1.0)  # default factor=1 for unknown drugs
+                mme = dose * factor
+                mme_list.append(mme)
+            except (ValueError, TypeError):
+                continue  # skip invalid/missing
 
-    if len(doses) < 2:
-        return 0  # not at risk by escalation
+    # absolute escalation check
+    escalation_flag = 0
+    if len(mme_list) >= 2:
+        mme_change = max(mme_list) - min(mme_list)
+        if mme_change >= ABSOLUTE_MME_THRESHOLD:
+            escalation_flag = 1
 
-    # net escalation or local escalation
-    if doses[-1] > doses[0]:
-        return 1
-    if any(doses[i] >= multiplier * doses[i-1] for i in range(1, len(doses))):
-        return 1
+    # final at risk label
+    at_risk = max(overdose_flag, escalation_flag)
+    return pd.Series({
+        "at_risk": at_risk,
+        "overdose_flag": overdose_flag,
+        "escalation_flag": escalation_flag
+    })
 
-    return 0
+## 5. compute at risk
+print("computing at risk labels...")
+risk_df = df.apply(compute_at_risk, axis=1)
+df[['at_risk', 'overdose_flag', 'escalation_flag']] = risk_df
 
-print("computing at-risk labels...")
-
-# compute at-risk labels
-df['at_risk'] = df.apply(lambda row: max(check_overdose(row), escalation_metrics(row)), axis=1)
-
-# select only subject id and at_risk for output
+## 6. save dataset
 output_df = df[[SUBJECT_COL, 'at_risk']]
-
 output_df.to_csv(OUTPUT_FILE, index=False)
-print(f"Labeled dataset saved to {OUTPUT_FILE}")
+print(f"labeled dataset saved to {OUTPUT_FILE}")
 
-risk_counts = output_df['at_risk'].value_counts()
+## 7. summary
+total_at_risk = df['at_risk'].sum()
+overdose_only = ((df['overdose_flag'] == 1) & (df['escalation_flag'] == 0)).sum()
+escalation_only = ((df['overdose_flag'] == 0) & (df['escalation_flag'] == 1)).sum()
+both_flags = ((df['overdose_flag'] == 1) & (df['escalation_flag'] == 1)).sum()
+neither = ((df['at_risk'] == 0)).sum()
+
 print("\nlabeling summary:")
-print(risk_counts)
+print(f"total at risk: {total_at_risk}")
+print(f"overdose only: {overdose_only}")
+print(f"escalation only: {escalation_only}")
+print(f"both overdose and escalation: {both_flags}")
+print(f"neither: {neither}")
