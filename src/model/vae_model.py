@@ -11,15 +11,12 @@ from tqdm import tqdm
 import json
 from sklearn.metrics import precision_score, recall_score, confusion_matrix
 
-
 # 1. globals
 INPUT_FILE = "../../data/model_data/feature_matrix.csv"
-
 CATEGORY_MAPPING_FILE = "../../data/model_data/category_mappings.json"
 ANOMALY_OUTPUT_FOLDER = "anomalies"
 ANOMALY_OUTPUT_FILE = "vae_anomalies_subject_ids.csv"
 os.makedirs(ANOMALY_OUTPUT_FOLDER, exist_ok=True)
-
 
 # 2. load and preprocess data
 ROWS_PER_PATIENT_PER_FILE = 100
@@ -98,12 +95,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 vae = VAE(input_dim=X.shape[1]).to(device)
 optimizer = optim.Adam(vae.parameters(), lr=1e-4)
 
-
-# 4. training loop
+# 4. training loop (no early stopping, always 50 epochs, save best model)
 EPOCHS = 50
 best_val_loss = float("inf")
-patience = 5
-patience_counter = 0
 
 print("starting training...")
 for epoch in range(EPOCHS):
@@ -135,21 +129,14 @@ for epoch in range(EPOCHS):
 
     print(f"Epoch {epoch+1:03d} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
 
-    # early stopping
+    # save best model only
     if avg_val_loss < best_val_loss:
         best_val_loss = avg_val_loss
-        patience_counter = 0
         torch.save(vae.state_dict(), "vae_best_model.pt")
-    else:
-        patience_counter += 1
-        if patience_counter >= patience:
-            print("Early stopping triggered!")
-            break
 
 # load best model before test evaluation
 vae.load_state_dict(torch.load("vae_best_model.pt"))
 print("finished training")
-
 
 # 5. anomaly detection
 vae.eval()
@@ -167,18 +154,16 @@ mse = np.concatenate(mse_list)
 mean_mse = np.mean(mse)
 std_mse = np.std(mse)
 z_scores = (mse - mean_mse) / std_mse
-z_threshold = 3.0
+z_threshold = 2.5
 anomalies = z_scores > z_threshold
 
 print(f"Mean MSE: {mean_mse:.4f}, Std MSE: {std_mse:.4f}")
 print(f"Z-score threshold: {z_threshold}")
 print(f"Detected {anomalies.sum()} anomalies out of {len(mse)} test samples.")
 
-
 # 6. save anomaly subject IDs and full data rows
 anomaly_ids = ids_test[anomalies]
 anomaly_data = df[df["subject_id"].isin(anomaly_ids)].copy()
-
 
 # 7. decode categorical columns
 if os.path.exists(CATEGORY_MAPPING_FILE):
@@ -194,7 +179,6 @@ if os.path.exists(CATEGORY_MAPPING_FILE):
 output_path = os.path.join(ANOMALY_OUTPUT_FOLDER, ANOMALY_OUTPUT_FILE)
 anomaly_data.to_csv(output_path, index=False)
 print(f"Full anomaly data saved to {output_path}")
-
 
 # 8. MSE Histogram
 mse_hist_path = os.path.join(ANOMALY_OUTPUT_FOLDER, "mse_reconstruction_error_histogram.png")
@@ -223,7 +207,6 @@ plt.legend()
 plt.tight_layout()
 plt.savefig(zscore_hist_path)
 plt.close()
-
 
 # 9. load labels from separate CSV
 LABELS_FILE = "feature_matrix_labeled.csv"

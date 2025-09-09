@@ -40,7 +40,13 @@ INCLUDED_COLUMNS_PER_FILE = {
 }
 
 SPECIAL_MISSING_VALUE = -1
-category_mappings = {}  # global dictionary to store sets of categories
+
+# -----------------------------
+# IMPORTANT CHANGE: use a global value->index mapping per column
+# - category_value_to_index[col_key] : { value_string -> integer_index }
+# We'll invert this when saving JSON to produce "index": "value" mapping.
+# -----------------------------
+category_value_to_index = {}  # NEW: global mapping from category value -> index
 
 def print_memory_usage(prefix=""):
     mem = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
@@ -67,21 +73,41 @@ def flatten_patient_groups(df, file_prefix):
             if col not in padded.columns:
                 continue
             vals = padded[col].tolist()
+
             if pd.api.types.is_numeric_dtype(padded[col]):
-                pass  # keep numeric
+                # numeric columns: keep as-is (NaN will be handled later)
+                codes = []
+                for v in vals:
+                    if pd.isna(v):
+                        codes.append(SPECIAL_MISSING_VALUE)
+                    else:
+                        # keep numeric values unchanged
+                        try:
+                            codes.append(float(v))
+                        except:
+                            codes.append(SPECIAL_MISSING_VALUE)
+                vals_to_write = codes
             else:
                 col_key = f"{file_prefix}_{col}"
-                # accumulate all categories globally
-                if col_key not in category_mappings:
-                    category_mappings[col_key] = set()
-                # add new categories seen in this patient
-                category_mappings[col_key].update([v for v in vals if pd.notna(v)])
-                # convert to codes for this patient (will be remapped later)
-                cat_series = pd.Series(vals).astype("category")
-                codes = cat_series.cat.codes.replace(-1, SPECIAL_MISSING_VALUE)
-                vals = codes.tolist()
 
-            for i, val in enumerate(vals):
+                # --- CHANGED: maintain a global value -> index mapping ---
+                if col_key not in category_value_to_index:
+                    category_value_to_index[col_key] = {}
+                cmap = category_value_to_index[col_key]
+
+                vals_to_write = []
+                for v in vals:
+                    if pd.isna(v):
+                        vals_to_write.append(SPECIAL_MISSING_VALUE)
+                    else:
+                        key = str(v)
+                        if key not in cmap:
+                            # assign next available integer index
+                            cmap[key] = len(cmap)
+                        vals_to_write.append(cmap[key])
+                # --- END CHANGED ---
+
+            for i, val in enumerate(vals_to_write):
                 row[f"{file_prefix}_{col}_{i}"] = val
         patient_rows.append(row)
 
@@ -141,11 +167,24 @@ def main():
         final_df.to_csv(OUTPUT_FILE, index=False)
         print(f"Final flattened dataset written to: {OUTPUT_FILE}")
 
-    # convert sets to sorted lists and save nicely formatted JSON
-    formatted_mappings = {k: sorted(list(v)) for k, v in category_mappings.items()}
+    # -----------------------------
+    # CHANGED: write index -> value mapping (string keys) for JSON
+    # We invert the value->index dict to produce {"0": "code", "1": "code2", ...}
+    # and pretty-print with indent=4.
+    # -----------------------------
+    formatted_mappings = {}
+    for col_key, val_to_idx in category_value_to_index.items():
+        # create a list of (value, index) sorted by index, then invert to idx->value
+        inv = {}
+        for val, idx in sorted(val_to_idx.items(), key=lambda x: x[1]):
+            inv[str(idx)] = val
+        formatted_mappings[col_key] = inv
+
+    os.makedirs(os.path.dirname(CATEGORY_MAPPING_FILE), exist_ok=True)
     with open(CATEGORY_MAPPING_FILE, "w") as f:
-        json.dump(formatted_mappings, f, indent=4)
+        json.dump(formatted_mappings, f, indent=4, ensure_ascii=False)
         print(f"Category mappings saved to: {CATEGORY_MAPPING_FILE}")
+    # -----------------------------
 
     write_clipped_version(OUTPUT_FILE, OUTPUT_CLIPPED_FOLDER, max_lines=CLIPPED_LINES)
 
